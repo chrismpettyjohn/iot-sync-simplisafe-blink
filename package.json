@@ -1,0 +1,24 @@
+{
+    "name": "iot-sync-simplisafe-blink",
+    "version": "0.0.1",
+    "scripts": {
+      "start": "bun run src/monitor.ts"
+    },
+    "dependencies": {
+      "dotenv": "16.5.0",
+      "nodemailer": "6.10.1",
+      "mailparser": "3.7.2",
+      "imap-simple": "5.1.0"
+    },
+    "devDependencies": {
+      "@types/node": "22.14.1",
+      "@types/nodemailer": "6.4.17",
+      "@types/mailparser": "3.4.5",
+      "@types/imap-simple": "4.2.9"
+    },
+    "engines": {
+      "node": ">=20.0.0",
+      "bun": ">=1.0.0"
+    },
+    "engineStrict": true
+}

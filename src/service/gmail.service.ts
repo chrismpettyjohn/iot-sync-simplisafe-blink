@@ -33,39 +33,40 @@ class GmailService {
     try {
       this.logger.info(`Monitoring inbox`);
       if (!this.connection) throw new Error('Email connection not established');
-  
-      let lastSeenUID = 0;
-    
+
       this.connection.on('mail', async () => {
         this.logger.info(`Email received`);
-  
+
         const searchCriteria = ['UNSEEN', ['FROM', from]];
         const fetchOptions = { bodies: [''], markSeen: true };
-  
-        this.logger.info(`Checking email content`)
+
+        this.logger.info(`Checking email content`);
         const results = await this.connection!.search(searchCriteria, fetchOptions);
-  
-        for (const res of results) {
-          const uid = res.attributes.uid;
-          if (uid <= lastSeenUID) continue;
-          lastSeenUID = uid;
-  
-          const raw = res.parts[0].body;
-          const parsed = await simpleParser(raw);
-  
-          const subject = parsed.subject || '';
-          const body = parsed.text || '';
-  
-          this.logger.info(`Email subject: ${subject}`);
-          callback(subject, body);
+
+        if (results.length === 0) {
+          this.logger.info('No new emails found');
+          return;
         }
+
+        // Sort results by UID in descending order (most recent first)
+        results.sort((a, b) => b.attributes.uid - a.attributes.uid);
+
+        // Process only the most recent email
+        const mostRecentEmail = results[0];
+        const raw = mostRecentEmail.parts[0].body;
+        const parsed = await simpleParser(raw);
+
+        const subject = parsed.subject || '';
+        const body = parsed.text || '';
+
+        this.logger.info(`Most recent email subject: ${subject}`);
+        callback(subject, body);
       });
     } catch (e: any) {
       this.logger.error(`Failed to monitor inbox due to ${e}`);
       throw e;
     }
   }
-  
 
   async sendEmail(recipient: string, subject: string, body: string) {
     try {

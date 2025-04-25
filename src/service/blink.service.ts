@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { BLINK_CLIENT, BLINK_EMAIL, BLINK_PASS, BLINK_VERIFIED } from '../config';
+import { BLINK_CLIENT, BLINK_EMAIL, BLINK_NETWORK, BLINK_PASS, BLINK_VERIFIED } from '../config';
 import { LoggerService } from './logger.service';
 
 interface BlinkAuthResponse {
@@ -27,7 +27,7 @@ export class BlinkService {
   
   private baseUrl = 'https://rest-prod.immedia-semi.com';
   private authToken  = '';
-  private networks: BlinkNetwork[] = [];
+  private network: BlinkNetwork | undefined;
 
 
   async login(): Promise<void> {
@@ -61,7 +61,7 @@ export class BlinkService {
         await this.verifyClientWithPin(data.account.account_id, data.account.client_id);
       }
 
-      await this.getNetworks();
+      await this.getNetwork();
     } catch (error) {
       this.logger.error(`Login failed: ${error}`);
       throw error;
@@ -100,7 +100,7 @@ export class BlinkService {
     }
   }
   
-  private async getNetworks(): Promise<void> {
+  private async getNetwork(): Promise<void> {
     if (!this.authToken) {
       throw new Error('Not authenticated. Call login() first');
     }
@@ -116,15 +116,16 @@ export class BlinkService {
         throw new Error(`Failed to get networks with status: ${response.status}`);
       }
 
-      const data = await response.json();
-      if (data.networks && Array.isArray(data.networks)) {
-        this.networks = data.networks;
-        this.logger.info(`Found ${this.networks.length} Blink networks`);
-        return;
+      const data: { networks: BlinkNetwork[] } = await response.json();
+
+      const matchingNetwork: BlinkNetwork | undefined = data.networks.find(_ => _.name === BLINK_NETWORK);
+
+      if (!matchingNetwork) {
+        throw new Error(`${BLINK_NETWORK} is missing from networks`);
       }
-      
-      this.logger.error('No networks found');
-      throw new Error('No networks found');
+
+      this.logger.info(`Found matching network ${BLINK_NETWORK}`);
+      this.network = matchingNetwork;
     } catch (error) {
       this.logger.error(`Network list failed: ${error}`);
       throw error;
@@ -136,24 +137,21 @@ export class BlinkService {
         this.logger.info('Arming Blink system');
         
         if (!this.authToken) throw new Error('Not authenticated. Call login() first');
-      
-        const armPromises = this.networks.map(async (network) => {
-            const response = await fetch(`${this.baseUrl}/network/${network.id}/arm`, {
-            method: 'POST',
-            headers: {
-                'TOKEN_AUTH': this.authToken,
-            },
-        });
 
+        if (!this.network) throw new Error('No network. Call getNetwork() first');
+      
+        const response = await fetch(`${this.baseUrl}/network/${this.network.id}/arm`, {
+          method: 'POST',
+          headers: {
+              'TOKEN_AUTH': this.authToken,
+          },
+        });
+        
         if (!response.ok) {
           const message = await response.text();
-          throw new Error(`Failed to arm network ${network.id} with status: ${response.status} and message: ${message}`);
+          throw new Error(`Failed to arm network ${BLINK_NETWORK} with status: ${response.status} and message: ${message}`);
         }
-        
-        return await response.json();
-      });
 
-      await Promise.all(armPromises);
       this.logger.info('Arm success');
       return true;
     } catch (error) {
@@ -165,9 +163,12 @@ export class BlinkService {
   async disarmSystem(): Promise<void> {
     try {
         this.logger.info('Disarming Blink system');
+        
+        if (!this.authToken) throw new Error('Not authenticated. Call login() first');
+
+        if (!this.network) throw new Error('No network. Call getNetwork() first');
       
-        const disarmPromises = this.networks.map(async (network) => {
-        const response = await fetch(`${this.baseUrl}/network/${network.id}/disarm`, {
+        const response = await fetch(`${this.baseUrl}/network/${this.network.id}/disarm`, {
           method: 'POST',
           headers: {
             'TOKEN_AUTH': this.authToken,
@@ -176,13 +177,9 @@ export class BlinkService {
 
         if (!response.ok) {
           const message = await response.text();
-          throw new Error(`Failed to disarm network ${network.id} with status: ${response.status} and message: ${message}`);
+          throw new Error(`Failed to disarm network ${BLINK_NETWORK} with status: ${response.status} and message: ${message}`);
         }
-        
-        return await response.json();
-      });
 
-      await Promise.all(disarmPromises);
       this.logger.info('Disarm success');
     } catch (error) {
       this.logger.error(`Disarm failed: ${error}`);

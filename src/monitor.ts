@@ -19,16 +19,17 @@ export class SimplisafeMonitor {
       
         if (!ALLOWED_SUBJECTS.includes(subject)) return;
       
-        const SYSTEM_ARMED = subject.includes('System Armed');
+        const shouldArm = subject.includes('Armed');
+        const shouldDisarm = subject.includes('Disarmed');
       
-        if (SYSTEM_ARMED) {
+        if (shouldArm) {
           await blinkService.armSystem();
-          gmailService.sendEmail(GMAIL_EMAIL, `Synced Simplisafe -> Blink`, 'Armed');
+          await gmailService.sendEmail(GMAIL_EMAIL, `Synced Simplisafe -> Blink`, 'Armed');
           return;
         }
-        if (!SYSTEM_ARMED) {
+        if (shouldDisarm) {
           await blinkService.disarmSystem();
-          gmailService.sendEmail(GMAIL_EMAIL, `Synced Simplisafe -> Blink`, 'Disarmed');
+          await gmailService.sendEmail(GMAIL_EMAIL, `Synced Simplisafe -> Blink`, 'Disarmed');
           return;
         }
 

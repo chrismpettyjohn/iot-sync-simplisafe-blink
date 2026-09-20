@@ -1,23 +1,80 @@
-import 'dotenv/config';
-import assert from 'node:assert';
+import { config as loadDotenv } from 'dotenv';
 
-assert(process.env.GMAIL_EMAIL, 'GMAIL_EMAIL is required');
-export const GMAIL_EMAIL: string = process.env.GMAIL_EMAIL;
+export interface AppConfig {
+  gmail: {
+    email: string;
+    appPassword: string;
+  };
+  blink: {
+    email: string;
+    password: string;
+    clientId: string;
+    networks: string[];
+  };
+  /** Where sync summaries go, or undefined to send none. */
+  notifyEmail?: string;
+}
 
-assert(process.env.GMAIL_PASS, 'GMAIL_PASS is required');
-export const GMAIL_PASS: string = process.env.GMAIL_PASS;
+export const ENV_KEYS = {
+  gmailEmail: 'GMAIL_EMAIL',
+  gmailPass: 'GMAIL_PASS',
+  blinkEmail: 'BLINK_EMAIL',
+  blinkPass: 'BLINK_PASS',
+  blinkClient: 'BLINK_CLIENT',
+  blinkNetworks: 'BLINK_NETWORKS',
+  notifyEmail: 'NOTIFY_EMAIL',
+} as const;
 
-assert(process.env.BLINK_CLIENT, 'BLINK_CLIENT is required');
-export const BLINK_CLIENT: string = process.env.BLINK_CLIENT;
+/** Splits a comma separated network list, trimming blanks. */
+export function parseNetworks(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(',').map(_ => _.trim()).filter(_ => _.length > 0);
+}
 
-assert(process.env.BLINK_EMAIL, 'BLINK_EMAIL is required');
-export const BLINK_EMAIL: string = process.env.BLINK_EMAIL;
+/**
+ * Reads .env into process.env and builds the config.
+ *
+ * Every missing key is reported at once so a half configured install is fixed
+ * in one pass rather than one restart per variable.
+ */
+export function loadConfig(): AppConfig {
+  loadDotenv({ quiet: true });
 
-assert(process.env.BLINK_PASS, 'BLINK_PASS is required');
-export const BLINK_PASS: string = process.env.BLINK_PASS;
+  const missing: string[] = [];
+  const read = (key: string): string => {
+    const value = process.env[key]?.trim();
+    if (!value) {
+      missing.push(key);
+      return '';
+    }
+    return value;
+  };
 
-assert(process.env.BLINK_NETWORK, 'BLINK_NETWORK is required');
-export const BLINK_NETWORK: string = process.env.BLINK_NETWORK;
+  const gmailEmail = read(ENV_KEYS.gmailEmail);
+  const gmailPass = read(ENV_KEYS.gmailPass);
+  const blinkEmail = read(ENV_KEYS.blinkEmail);
+  const blinkPass = read(ENV_KEYS.blinkPass);
+  const blinkClient = read(ENV_KEYS.blinkClient);
 
-assert(process.env.BLINK_VERIFIED, 'BLINK_VERIFIED is required');
-export const BLINK_VERIFIED: boolean = process.env.BLINK_VERIFIED.toLowerCase() === 'true';
+  // BLINK_NETWORK (singular) was the pre multi-network key; still honoured.
+  const networks = parseNetworks(
+    process.env[ENV_KEYS.blinkNetworks] ?? process.env.BLINK_NETWORK,
+  );
+  if (networks.length === 0) missing.push(ENV_KEYS.blinkNetworks);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing configuration: ${missing.join(', ')}.\nRun \`bun run setup\` to configure.`,
+    );
+  }
+
+  // Optional on purpose: leaving NOTIFY_EMAIL unset turns the sync
+  // notification emails off without affecting the inbox being watched.
+  const notifyEmail = process.env[ENV_KEYS.notifyEmail]?.trim() || undefined;
+
+  return {
+    gmail: { email: gmailEmail, appPassword: gmailPass },
+    blink: { email: blinkEmail, password: blinkPass, clientId: blinkClient, networks },
+    notifyEmail,
+  };
+}

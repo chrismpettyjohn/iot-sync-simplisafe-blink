@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so CI matches the committed bun.lock rather than drifting with
+  # whatever Bun releases next.
+  BUN_VERSION: 1.3.14
+
+jobs:
+  test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      # The bundle pulls in imapflow, nodemailer and mailparser, so running it
+      # catches a dependency that resolves in source but breaks once bundled.
+      - name: Smoke test the bundle
+        run: |
+          set -euo pipefail
+
+          bun run dist/cli.js help | grep -q 'bun run setup'
+
+          # With no .env present this must fail cleanly and point at setup,
+          # rather than crashing or hanging on a prompt.
+          output=$(cd "$(mktemp -d)" && bun run "$GITHUB_WORKSPACE/dist/cli.js" start 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q 'Missing configuration'
+          echo "$output" | grep -q 'bun run setup'
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-bundle
+          path: dist/cli.js
+          if-no-files-found: error
+          retention-days: 14

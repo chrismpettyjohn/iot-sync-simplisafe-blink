@@ -1,191 +1,213 @@
-import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
-import { BLINK_CLIENT, BLINK_EMAIL, BLINK_NETWORK, BLINK_PASS, BLINK_VERIFIED } from '../config';
 import { LoggerService } from './logger.service';
+import { ask } from '../lib/prompt';
+import { readBlinkAuth, writeBlinkAuth } from '../lib/blink-auth-store';
+import type { ArmResult, ArmState, ArmTarget } from '../lib/arm-target';
 
 interface BlinkAuthResponse {
-    account: {
-        account_id: string;
-        user_id: string;
-        client_id: string;
-        client_verification_required: boolean;
-        tier: string;
-    }
-    auth: {
-        token: string;
-    }
+  account: {
+    account_id: string;
+    user_id: string;
+    client_id: string;
+    client_verification_required: boolean;
+    tier: string;
+  };
+  auth: {
+    token: string;
+  };
 }
 
-interface BlinkNetwork {
+interface BlinkPinVerifyResponse {
+  valid?: boolean;
+  message?: string;
+}
+
+export interface BlinkNetwork {
   id: number;
   name: string;
   armed: boolean;
 }
 
-export class BlinkService {
-  private readonly logger = new LoggerService(BlinkService);
-  
-  private baseUrl = 'https://rest-prod.immedia-semi.com';
-  private authToken  = '';
-  private network: BlinkNetwork | undefined;
+export interface BlinkCredentials {
+  email: string;
+  password: string;
+  clientId: string;
+  networks: string[];
+}
 
+const DEFAULT_BASE_URL = 'https://rest-prod.immedia-semi.com';
+
+export class BlinkService implements ArmTarget {
+  readonly name = 'blink';
+
+  private readonly logger = new LoggerService('BlinkService');
+
+  private baseUrl = DEFAULT_BASE_URL;
+  private authToken = '';
+  private networks: BlinkNetwork[] = [];
+
+  constructor(private readonly credentials: BlinkCredentials) {}
 
   async login(): Promise<void> {
     this.logger.info('Logging in to Blink API');
-    
-    try {
-      const response = await fetch(`${this.baseUrl}/api/v5/account/login`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: BLINK_EMAIL,
-          password: BLINK_PASS,
-          unique_id: BLINK_CLIENT,
-          reauth: BLINK_VERIFIED
-        }),
-      });
 
-      if (!response.ok) {
-        const msg = await response.text();
-        this.logger.error(msg)
-        throw new Error(`Login failed with status: ${response.status}`);
-      }
+    // A stored token means this client id has already cleared 2FA, so Blink
+    // is asked to reauth rather than re-issuing a PIN challenge.
+    const stored = readBlinkAuth(this.credentials.clientId);
+    if (stored) this.logger.debug('Found stored Blink client verification');
 
-      const data: BlinkAuthResponse = await response.json();
-      this.baseUrl = `https://rest-${data.account.tier}.immedia-semi.com`;
-      this.authToken = data.auth.token;
-      
-      if (data.account.client_verification_required) {
-        await this.verifyClientWithPin(data.account.account_id, data.account.client_id);
-      }
+    const response = await fetch(`${DEFAULT_BASE_URL}/api/v5/account/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: this.credentials.email,
+        password: this.credentials.password,
+        unique_id: this.credentials.clientId,
+        reauth: Boolean(stored),
+      }),
+    });
 
-      await this.getNetwork();
-    } catch (error) {
-      this.logger.error(`Login failed: ${error}`);
-      throw error;
+    if (!response.ok) {
+      const message = await response.text();
+      this.logger.error(message);
+      throw new Error(`Login failed with status: ${response.status}`);
     }
+
+    const data = (await response.json()) as BlinkAuthResponse;
+    this.baseUrl = `https://rest-${data.account.tier}.immedia-semi.com`;
+    this.authToken = data.auth.token;
+
+    if (data.account.client_verification_required) {
+      await this.verifyClientWithPin(data.account.account_id, data.account.client_id);
+    }
+
+    writeBlinkAuth({
+      uniqueId: this.credentials.clientId,
+      token: this.authToken,
+      tier: data.account.tier,
+      accountId: data.account.account_id,
+      clientId: data.account.client_id,
+      verifiedAt: new Date().toISOString(),
+    });
+
+    this.logger.info('Logged in to Blink API');
   }
 
-  async verifyClientWithPin(accountId: string, clientId: string): Promise<void> {  
-    const rl = readline.createInterface({ input, output });
-    const pin = await rl.question('Enter the Blink verification PIN: ');
-    console.log(pin)
-    rl.close();
-  
-    try {
-      const response = await fetch(`${this.baseUrl}/api/v4/account/${accountId}/client/${clientId}/pin/verify`, {
+  async verifyClientWithPin(accountId: string, clientId: string): Promise<void> {
+    const pin = await ask('Enter the Blink verification PIN');
+
+    const response = await fetch(
+      `${this.baseUrl}/api/v4/account/${accountId}/client/${clientId}/pin/verify`,
+      {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'TOKEN_AUTH': this.authToken,
-        },
+        headers: { 'Content-Type': 'application/json', TOKEN_AUTH: this.authToken },
         body: JSON.stringify({ pin }),
-      });
-  
-      if (!response.ok) {
-        const msg = await response.text();
-        this.logger.error(msg);
-        throw new Error(`PIN verification failed with status: ${response.status}`);
-      }
-  
-      const data = await response.json();
-      if (!data.valid) throw new Error('PIN invalid or expired');
-  
-      this.logger.info('Client successfully verified');
-    } catch (error) {
-      this.logger.error(`PIN verification failed: ${error}`);
-      throw error;
-    }
-  }
-  
-  private async getNetwork(): Promise<void> {
-    if (!this.authToken) {
-      throw new Error('Not authenticated. Call login() first');
+      },
+    );
+
+    if (!response.ok) {
+      const message = await response.text();
+      this.logger.error(message);
+      throw new Error(`PIN verification failed with status: ${response.status}`);
     }
 
-    try {
-      const response = await fetch(`${this.baseUrl}/networks`, {
-        headers: {
-          'TOKEN_AUTH': this.authToken,
-        },
-      });
+    const data = (await response.json()) as BlinkPinVerifyResponse;
+    if (!data.valid) throw new Error(data.message ?? 'PIN invalid or expired');
 
-      if (!response.ok) {
-        throw new Error(`Failed to get networks with status: ${response.status}`);
-      }
-
-      const data: { networks: BlinkNetwork[] } = await response.json();
-
-      const matchingNetwork: BlinkNetwork | undefined = data.networks.find(_ => _.name === BLINK_NETWORK);
-
-      if (!matchingNetwork) {
-        throw new Error(`${BLINK_NETWORK} is missing from networks`);
-      }
-
-      this.logger.info(`Found matching network ${BLINK_NETWORK}`);
-      this.network = matchingNetwork;
-    } catch (error) {
-      this.logger.error(`Network list failed: ${error}`);
-      throw error;
-    }
+    this.logger.info('Client successfully verified');
   }
 
-  async armSystem(): Promise<boolean> {
-    try {
-        this.logger.info('Arming Blink system');
-        
-        if (!this.authToken) throw new Error('Not authenticated. Call login() first');
+  /** Every network on the account, whether or not it is configured for sync. */
+  async listNetworks(): Promise<BlinkNetwork[]> {
+    if (!this.authToken) throw new Error('Not authenticated. Call login() first');
 
-        if (!this.network) throw new Error('No network. Call getNetwork() first');
-      
-        const response = await fetch(`${this.baseUrl}/network/${this.network.id}/arm`, {
+    const response = await fetch(`${this.baseUrl}/networks`, {
+      headers: { TOKEN_AUTH: this.authToken },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get networks with status: ${response.status}`);
+    }
+
+    const data = (await response.json()) as { networks: BlinkNetwork[] };
+    return data.networks ?? [];
+  }
+
+  /**
+   * Resolves every configured network name to an id and caches the result.
+   *
+   * Unmatched names fail with the list of what does exist, since an exact name
+   * mismatch is the most likely configuration error here.
+   */
+  async resolveNetworks(): Promise<void> {
+    const available = await this.listNetworks();
+
+    const resolved: BlinkNetwork[] = [];
+    const missing: string[] = [];
+
+    for (const wanted of this.credentials.networks) {
+      const match = available.find(_ => _.name.trim().toLowerCase() === wanted.trim().toLowerCase());
+      if (match) resolved.push(match);
+      else missing.push(wanted);
+    }
+
+    if (missing.length > 0) {
+      const names = available.map(_ => _.name).join(', ') || '(none)';
+      throw new Error(`Network(s) not found on this Blink account: ${missing.join(', ')}. Available: ${names}`);
+    }
+
+    this.networks = resolved;
+    this.logger.info(`Syncing ${resolved.length} network(s): ${resolved.map(_ => _.name).join(', ')}`);
+  }
+
+  async apply(state: ArmState): Promise<ArmResult[]> {
+    return this.setArmed(state === 'armed');
+  }
+
+  /**
+   * Arms or disarms every configured network.
+   *
+   * Requests are settled independently so one unreachable sync module cannot
+   * leave the others in the wrong state; the caller reports the breakdown.
+   */
+  async setArmed(armed: boolean): Promise<ArmResult[]> {
+    if (!this.authToken) throw new Error('Not authenticated. Call login() first');
+    if (this.networks.length === 0) throw new Error('No networks. Call resolveNetworks() first');
+
+    const action = armed ? 'arm' : 'disarm';
+    this.logger.info(`${armed ? 'Arming' : 'Disarming'} ${this.networks.length} Blink network(s)`);
+
+    const settled = await Promise.allSettled(
+      this.networks.map(async network => {
+        const response = await fetch(`${this.baseUrl}/network/${network.id}/${action}`, {
           method: 'POST',
-          headers: {
-              'TOKEN_AUTH': this.authToken,
-          },
-        });
-        
-        if (!response.ok) {
-          const message = await response.text();
-          throw new Error(`Failed to arm network ${BLINK_NETWORK} with status: ${response.status} and message: ${message}`);
-        }
-
-      this.logger.info('Arm success');
-      return true;
-    } catch (error) {
-      this.logger.error(`Arm failure: ${error}`);
-      throw error;
-    }
-  }
-
-  async disarmSystem(): Promise<void> {
-    try {
-        this.logger.info('Disarming Blink system');
-        
-        if (!this.authToken) throw new Error('Not authenticated. Call login() first');
-
-        if (!this.network) throw new Error('No network. Call getNetwork() first');
-      
-        const response = await fetch(`${this.baseUrl}/network/${this.network.id}/disarm`, {
-          method: 'POST',
-          headers: {
-            'TOKEN_AUTH': this.authToken,
-          },
+          headers: { TOKEN_AUTH: this.authToken },
         });
 
         if (!response.ok) {
           const message = await response.text();
-          throw new Error(`Failed to disarm network ${BLINK_NETWORK} with status: ${response.status} and message: ${message}`);
+          throw new Error(`status ${response.status}: ${message}`);
         }
 
-      this.logger.info('Disarm success');
-    } catch (error) {
-      this.logger.error(`Disarm failed: ${error}`);
-      throw error;
+        network.armed = armed;
+      }),
+    );
+
+    const results: ArmResult[] = settled.map((outcome, index) => {
+      const name = this.networks[index]!.name;
+      if (outcome.status === 'fulfilled') {
+        this.logger.info(`${action} succeeded for ${name}`);
+        return { name, ok: true };
+      }
+
+      const error = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      this.logger.error(`${action} failed for ${name}: ${error}`);
+      return { name, ok: false, error };
+    });
+
+    if (results.every(_ => !_.ok)) {
+      throw new Error(`Failed to ${action} every network: ${results.map(_ => `${_.name} (${_.error})`).join('; ')}`);
     }
+
+    return results;
   }
 }
-
-export const blinkService: BlinkService = new BlinkService();
